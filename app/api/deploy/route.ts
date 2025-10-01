@@ -42,7 +42,6 @@ export async function POST(request: NextRequest) {
     });
 
     let currentCommitSha: string | undefined;
-    let baseTreeSha: string | undefined;
 
     try {
       const { data: refData } = await octokit.git.getRef({
@@ -51,44 +50,30 @@ export async function POST(request: NextRequest) {
         ref: "heads/main",
       });
       currentCommitSha = refData.object.sha;
-      const { data: currentCommit } = await octokit.git.getCommit({
-        owner,
-        repo,
-        commit_sha: currentCommitSha,
-      });
-      baseTreeSha = currentCommit.tree.sha;
     } catch (error: any) {
-      // Perubahan ada di sini: Tangani error 404 dan 409
       if (error.status !== 404 && error.status !== 409) {
         throw error;
       }
     }
-
-    const blobs = await Promise.all(
-      zipEntries
-        .filter((entry) => !entry.isDirectory)
-        .map(async (entry) => {
-          const content = entry.getData().toString("base64");
-          const { data: blob } = await octokit.git.createBlob({
-            owner,
-            repo,
-            content,
-            encoding: "base64",
-          });
-          return {
-            path: entry.entryName,
-            mode: "100644" as const,
-            type: "blob" as const,
-            sha: blob.sha,
-          };
-        })
-    );
+    
+    // **PERUBAHAN UTAMA DI SINI**
+    // Buat tree object langsung dari konten file, tanpa membuat blob terlebih dahulu.
+    const tree = zipEntries
+      .filter((entry) => !entry.isDirectory)
+      .map((entry) => {
+        return {
+          path: entry.entryName,
+          mode: "100644" as const,
+          type: "blob" as const,
+          content: entry.getData().toString("utf8"), // Kirim konten langsung
+        };
+      });
 
     const { data: newTree } = await octokit.git.createTree({
       owner,
       repo,
-      ...(baseTreeSha ? { base_tree: baseTreeSha } : {}),
-      tree: blobs,
+      tree,
+      // Kita tidak memerlukan base_tree untuk kasus ini
     });
 
     const { data: newCommit } = await octokit.git.createCommit({
@@ -124,9 +109,11 @@ export async function POST(request: NextRequest) {
     });
   } catch (error: any) {
     console.error("Deployment error:", error);
+    // Berikan pesan error yang lebih spesifik jika memungkinkan
+    const errorMessage = error.response?.data?.message || error.message || "Failed to deploy";
     return NextResponse.json(
-      { error: error.message || "Failed to deploy" },
-      { status: 500 }
+      { error: errorMessage },
+      { status: error.status || 500 }
     );
   }
 }
