@@ -4,6 +4,8 @@ import { authOptions } from "../auth/[...nextauth]/route";
 import { Octokit } from "@octokit/rest";
 import AdmZip from "adm-zip";
 
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
@@ -39,21 +41,29 @@ export async function POST(request: NextRequest) {
       auth: (session as any).accessToken,
     });
 
-    const { data: refData } = await octokit.git.getRef({
-      owner,
-      repo,
-      ref: "heads/main",
-    });
+    let currentCommitSha: string | undefined;
+    let baseTreeSha: string | undefined;
 
-    const currentCommitSha = refData.object.sha;
-
-    const { data: currentCommit } = await octokit.git.getCommit({
-      owner,
-      repo,
-      commit_sha: currentCommitSha,
-    });
-
-    const baseTreeSha = currentCommit.tree.sha;
+    try {
+      // Coba dapatkan referensi branch 'main'
+      const { data: refData } = await octokit.git.getRef({
+        owner,
+        repo,
+        ref: "heads/main",
+      });
+      currentCommitSha = refData.object.sha;
+      const { data: currentCommit } = await octokit.git.getCommit({
+        owner,
+        repo,
+        commit_sha: currentCommitSha,
+      });
+      baseTreeSha = currentCommit.tree.sha;
+    } catch (error: any) {
+      // Jika error 404, berarti repo kosong. Kita bisa abaikan.
+      if (error.status !== 404) {
+        throw error;
+      }
+    }
 
     const blobs = await Promise.all(
       zipEntries
@@ -78,7 +88,7 @@ export async function POST(request: NextRequest) {
     const { data: newTree } = await octokit.git.createTree({
       owner,
       repo,
-      base_tree: baseTreeSha,
+      ...(baseTreeSha ? { base_tree: baseTreeSha } : {}), // Hanya gunakan base_tree jika ada
       tree: blobs,
     });
 
@@ -87,15 +97,25 @@ export async function POST(request: NextRequest) {
       repo,
       message: commitMessage,
       tree: newTree.sha,
-      parents: [currentCommitSha],
+      ...(currentCommitSha ? { parents: [currentCommitSha] } : {}), // Hanya gunakan parents jika ada
     });
 
-    await octokit.git.updateRef({
-      owner,
-      repo,
-      ref: "heads/main",
-      sha: newCommit.sha,
-    });
+    // Jika repo kosong, buat ref baru. Jika tidak, update ref yang sudah ada.
+    if (currentCommitSha) {
+      await octokit.git.updateRef({
+        owner,
+        repo,
+        ref: "heads/main",
+        sha: newCommit.sha,
+      });
+    } else {
+      await octokit.git.createRef({
+        owner,
+        repo,
+        ref: "refs/heads/main",
+        sha: newCommit.sha,
+      });
+    }
 
     const commitUrl = `https://github.com/${owner}/${repo}/commit/${newCommit.sha}`;
 
