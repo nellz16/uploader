@@ -45,7 +45,6 @@ export async function POST(request: NextRequest) {
     let baseTreeSha: string | undefined;
 
     try {
-      // Coba dapatkan referensi branch 'main'
       const { data: refData } = await octokit.git.getRef({
         owner,
         repo,
@@ -59,8 +58,8 @@ export async function POST(request: NextRequest) {
       });
       baseTreeSha = currentCommit.tree.sha;
     } catch (error: any) {
-      // Jika error 404, berarti repo kosong. Kita bisa abaikan.
-      if (error.status !== 404) {
+      // Perubahan ada di sini: Tangani error 404 dan 409
+      if (error.status !== 404 && error.status !== 409) {
         throw error;
       }
     }
@@ -88,7 +87,7 @@ export async function POST(request: NextRequest) {
     const { data: newTree } = await octokit.git.createTree({
       owner,
       repo,
-      ...(baseTreeSha ? { base_tree: baseTreeSha } : {}), // Hanya gunakan base_tree jika ada
+      ...(baseTreeSha ? { base_tree: baseTreeSha } : {}),
       tree: blobs,
     });
 
@@ -97,10 +96,9 @@ export async function POST(request: NextRequest) {
       repo,
       message: commitMessage,
       tree: newTree.sha,
-      ...(currentCommitSha ? { parents: [currentCommitSha] } : {}), // Hanya gunakan parents jika ada
+      ...(currentCommitSha ? { parents: [currentCommitSha] } : {}),
     });
 
-    // Jika repo kosong, buat ref baru. Jika tidak, update ref yang sudah ada.
     if (currentCommitSha) {
       await octokit.git.updateRef({
         owner,
