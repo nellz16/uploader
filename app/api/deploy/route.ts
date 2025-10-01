@@ -7,16 +7,18 @@ import AdmZip from "adm-zip";
 export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
+  const session = await getServerSession(authOptions);
+
+  if (!session || !(session as any).accessToken) {
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
+  const octokit = new Octokit({ auth: (session as any).accessToken });
+
   try {
-    const session = await getServerSession(authOptions);
-
-    if (!session || !(session as any).accessToken) {
-      return NextResponse.json(
-        { error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
-
     const formData = await request.formData();
     const file = formData.get("file") as File;
     const repoFullName = formData.get("repo") as string;
@@ -31,85 +33,86 @@ export async function POST(request: NextRequest) {
 
     const [owner, repo] = repoFullName.split("/");
 
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
+    const buffer = Buffer.from(await file.arrayBuffer());
     const zip = new AdmZip(buffer);
     const zipEntries = zip.getEntries();
 
-    const octokit = new Octokit({
-      auth: (session as any).accessToken,
-    });
+    // Buat daftar file untuk API
+    const filesForTree = zipEntries
+      .filter(entry => !entry.isDirectory)
+      .map(entry => ({
+        path: entry.entryName,
+        mode: '100644' as const,
+        type: 'blob' as const,
+        content: entry.getData().toString('utf8'), // GitHub API akan menangani encoding
+      }));
+      
+    if (filesForTree.length === 0) {
+      return NextResponse.json({ error: "ZIP file is empty or contains only directories." }, { status: 400 });
+    }
 
-    let currentCommitSha: string | undefined;
-
+    // Cek apakah branch 'main' ada
+    let parentCommitSha: string | null = null;
     try {
       const { data: refData } = await octokit.git.getRef({
         owner,
         repo,
         ref: "heads/main",
       });
-      currentCommitSha = refData.object.sha;
+      parentCommitSha = refData.object.sha;
     } catch (error: any) {
+      // Abaikan error 404/409, ini berarti repo kosong
       if (error.status !== 404 && error.status !== 409) {
         throw error;
       }
     }
-    
-    // **PERUBAHAN UTAMA DI SINI**
-    // Buat tree object langsung dari konten file, tanpa membuat blob terlebih dahulu.
-    const tree = zipEntries
-      .filter((entry) => !entry.isDirectory)
-      .map((entry) => {
-        return {
-          path: entry.entryName,
-          mode: "100644" as const,
-          type: "blob" as const,
-          content: entry.getData().toString("utf8"), // Kirim konten langsung
-        };
-      });
 
-    const { data: newTree } = await octokit.git.createTree({
+    // Buat tree dari daftar file
+    const { data: tree } = await octokit.git.createTree({
       owner,
       repo,
-      tree,
-      // Kita tidak memerlukan base_tree untuk kasus ini
+      tree: filesForTree,
     });
 
-    const { data: newCommit } = await octokit.git.createCommit({
+    // Buat commit
+    const { data: commit } = await octokit.git.createCommit({
       owner,
       repo,
       message: commitMessage,
-      tree: newTree.sha,
-      ...(currentCommitSha ? { parents: [currentCommitSha] } : {}),
+      tree: tree.sha,
+      // Hanya tambahkan parent jika repo tidak kosong
+      parents: parentCommitSha ? [parentCommitSha] : [],
     });
 
-    if (currentCommitSha) {
+    // Buat atau update branch 'main' untuk menunjuk ke commit baru
+    if (parentCommitSha) {
+      // Repo sudah ada, update ref
       await octokit.git.updateRef({
         owner,
         repo,
         ref: "heads/main",
-        sha: newCommit.sha,
+        sha: commit.sha,
       });
     } else {
+      // Repo kosong, buat ref baru
       await octokit.git.createRef({
         owner,
         repo,
         ref: "refs/heads/main",
-        sha: newCommit.sha,
+        sha: commit.sha,
       });
     }
 
-    const commitUrl = `https://github.com/${owner}/${repo}/commit/${newCommit.sha}`;
+    const commitUrl = `https://github.com/${owner}/${repo}/commit/${commit.sha}`;
 
     return NextResponse.json({
       success: true,
       commitUrl,
       message: "Deployment complete!",
     });
+
   } catch (error: any) {
     console.error("Deployment error:", error);
-    // Berikan pesan error yang lebih spesifik jika memungkinkan
     const errorMessage = error.response?.data?.message || error.message || "Failed to deploy";
     return NextResponse.json(
       { error: errorMessage },
