@@ -248,7 +248,7 @@ export default function Dashboard() {
                       >
                         <SelectValue placeholder="Choose a repository" />
                       </SelectTrigger>
-                      <SelectContent className="bg-gray-800 border-gray-700">
+                      <SelectContent className="bg-gray-800 border-gray-700 max-h-72">
                         {repositories.map((repo) => (
                           <SelectItem
                             key={repo.id}
@@ -356,3 +356,4 @@ export default function Dashboard() {
     </div>
   );
 }
+
